@@ -1,7 +1,7 @@
 #!/bin/sh
 BASE_DIR=/www/mt-spark-submit
 BACKUP_DIR=/www/mt-spark-submit-backup
-COMMAND_PATH=/usr/bin/datawork-client
+COMMAND_PATH=/usr/bin/mt-spark-submit
 waitProcessEnd() {
     process_name=$1
     if [ -z "$process_name" ]; then
@@ -59,6 +59,18 @@ install() {
     fi
     echo "--------------开始解压安装包:"
     tar xvf /www/mt-spark-submit.tar.gz -C /www
+    chmod -R a+r ${BASE_DIR}
+
+    echo "--------------开始恢复spark-default文件:"
+    if [ -f ${BACKUP_DIR}/conf/spark-defaults.conf ]; then
+        echo "copy spark-defaults.conf"
+        cp ${BACKUP_DIR}/conf/spark-defaults.conf ${BASE_DIR}/conf/
+    fi
+
+    if [ -f ${BACKUP_DIR}/conf/spark-online-defaults.conf ]; then
+        echo "copy spark-online-defaults.conf"
+        cp ${BACKUP_DIR}/conf/spark-online-defaults.conf ${BASE_DIR}/conf/
+    fi
     echo "--------------执行安装脚本"
     sh /www/mt-spark-submit/sbin/install.sh
     echo "--------------安装完成"
