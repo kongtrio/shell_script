@@ -13,10 +13,55 @@ RESET="\033[0m"
 # 获取脚本所在目录
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 检查并创建hadoopuser用户
+function check_create_hadoopuser() {
+    log "INFO" "${BOLD}${BLUE}检查hadoopuser用户${RESET}"
+    
+    # 检查hadoopuser用户是否存在
+    if id "hadoopuser" &>/dev/null; then
+        log "INFO" "${GREEN}hadoopuser用户已存在${RESET}"
+    else
+        log "INFO" "${YELLOW}hadoopuser用户不存在，开始创建...${RESET}"
+        
+        # 创建hadoopuser用户
+        useradd -m hadoopuser
+        if ! check_command_result $? "创建hadoopuser用户失败"; then
+            return 1
+        fi
+        
+        # 设置密码为123456!
+        echo "hadoopuser:123456!" | chpasswd
+        if ! check_command_result $? "设置hadoopuser密码失败"; then
+            return 1
+        fi
+        
+        log "INFO" "${GREEN}hadoopuser用户创建成功，密码设置为123456!${RESET}"
+    fi
+    
+    # 确保安装目录对hadoopuser有权限
+    if [ ! -d "$base_dir" ]; then
+        mkdir -p "$base_dir"
+    fi
+    chown -R hadoopuser:hadoopuser "$base_dir"
+    
+    return 0
+}
+
+# 以hadoopuser身份执行命令
+function run_as_hadoopuser() {
+    local cmd="$1"
+    log "INFO" "以hadoopuser身份执行: $cmd"
+    # 使用-l选项确保加载用户环境
+    su -l hadoopuser -c "$cmd"
+    local result=$?
+    log "INFO" "命令执行结果代码: $result"
+    return $result
+}
+
 # 默认配置
 base_dir="/www"
 packages_dir="$script_dir"  # 默认使用脚本所在目录作为安装包目录
-remote_dir="bigdata@10.16.16.235::hw_bigdatabasics"
+remote_dir="bigdata@10.63.0.115::ali_data_dev_upload"
 verbose=false
 log_file="$script_dir/setup_tools_$(date +%Y%m%d_%H%M%S).log"
 force_install=false
@@ -25,6 +70,7 @@ selected_tools=()
 # 安装JDK
 function install_jdk() {
     log "INFO" "${BOLD}${MAGENTA}====== 开始处理 JDK 1.8.0_51 ======${RESET}"
+    log "INFO" "使用hadoopuser用户安装JDK"
     jdk_tar_name="jdk1.8.0_51.tar.gz"
     jdk_dir="$base_dir/jdk1.8.0_51"
     
@@ -84,12 +130,16 @@ function install_jdk() {
         fi
         
         log "INFO" "解压 $jdk_tar_name"
-        tar -zxf $packages_dir/$jdk_tar_name -C $base_dir > /dev/null 2>&1 &
+        # 使用hadoopuser用户解压
+        run_as_hadoopuser "tar -zxf $packages_dir/$jdk_tar_name -C $base_dir" > /dev/null 2>&1 &
         show_progress $! "解压 JDK"
         result=$?
         if ! check_command_result $result "解压 $jdk_tar_name 失败，请检查文件是否完整"; then
             return 1
         fi
+        
+        # 确保文件权限属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$jdk_dir"
         
         # 检查安装目录是否存在
         if [ ! -d "$jdk_dir" ]; then
@@ -98,13 +148,27 @@ function install_jdk() {
         fi
         
         # 配置环境变量
-        log "INFO" "配置JDK环境变量"
+        log "INFO" "为hadoopuser配置JDK环境变量"
         
-        # 检查是否已配置环境变量
-        if grep -q "JAVA_HOME=$jdk_dir" /root/.bashrc; then
-            log "INFO" "JAVA_HOME环境变量已存在，无需重复配置"
+        # 检查hadoopuser用户是否已配置环境变量
+        if run_as_hadoopuser "grep -q 'JAVA_HOME=$jdk_dir' ~/.bashrc"; then
+            log "INFO" "hadoopuser的JAVA_HOME环境变量已存在，无需重复配置"
         else
-            # 添加环境变量到root的.bashrc文件
+            # 添加环境变量到hadoopuser的.bashrc文件
+            log "INFO" "添加环境变量到hadoopuser的.bashrc文件"
+            
+            # 使用su命令执行
+            su - hadoopuser -c "echo '' >> ~/.bashrc"
+            su - hadoopuser -c "echo '# JDK环境变量配置' >> ~/.bashrc"
+            su - hadoopuser -c "echo 'export JAVA_HOME=$jdk_dir' >> ~/.bashrc"
+            su - hadoopuser -c "echo 'export PATH=\$JAVA_HOME/bin:\$PATH' >> ~/.bashrc"
+            
+            log "INFO" "已为hadoopuser配置JAVA_HOME=$jdk_dir"
+            log "INFO" "已为hadoopuser将JDK添加到PATH环境变量"
+        fi
+        
+        # 同时也为root配置环境变量（为了兼容性）
+        if ! grep -q "JAVA_HOME=$jdk_dir" /root/.bashrc; then
             echo "" >> /root/.bashrc
             echo "# JDK环境变量配置" >> /root/.bashrc
             echo "export JAVA_HOME=$jdk_dir" >> /root/.bashrc
@@ -114,16 +178,16 @@ function install_jdk() {
             export JAVA_HOME=$jdk_dir
             export PATH=$JAVA_HOME/bin:$PATH
             
-            log "INFO" "已配置JAVA_HOME=$jdk_dir"
-            log "INFO" "已将JDK添加到PATH环境变量"
+            log "INFO" "同时也为root配置JAVA_HOME=$jdk_dir"
         fi
         
-        # 验证JDK安装
-        if command -v java > /dev/null 2>&1; then
-            java_version=$(java -version 2>&1 | head -n 1)
-            log "INFO" "${GREEN}JDK安装验证成功: $java_version${RESET}"
+        # 验证JDK安装（使用hadoopuser用户）
+        log "INFO" "使用hadoopuser用户验证JDK安装"
+        if run_as_hadoopuser "command -v java" > /dev/null 2>&1; then
+            java_version=$(run_as_hadoopuser "java -version 2>&1 | head -n 1")
+            log "INFO" "${GREEN}hadoopuser用户JDK安装验证成功: $java_version${RESET}"
         else
-            log "WARN" "JDK安装可能未成功，无法执行java命令"
+            log "WARN" "hadoopuser用户JDK安装可能未成功，无法执行java命令"
         fi
         
         log "INFO" "${GREEN}${BOLD}JDK 安装完成${RESET}"
@@ -220,6 +284,7 @@ check_command_result() {
 # 安装datawork-client，如果本地已经安装了，则跳过
 function install_datawork_client() {
     log "INFO" "${BOLD}${MAGENTA}====== 开始处理 datawork-client ======${RESET}"
+    log "INFO" "使用hadoopuser用户安装datawork-client"
     datawork_client_tar_name="datawork-client.tar.gz"
     datawork_client_dir="$base_dir/datawork-client"
     local install_status=0
@@ -265,12 +330,16 @@ function install_datawork_client() {
         fi
         
         log "INFO" "解压 $datawork_client_tar_name"
-        tar -zxf $packages_dir/$datawork_client_tar_name -C $base_dir > /dev/null 2>&1 &
+        # 使用hadoopuser用户解压
+        run_as_hadoopuser "tar -zxf $packages_dir/$datawork_client_tar_name -C $base_dir" > /dev/null 2>&1 &
         show_progress $! "解压 datawork-client"
         result=$?
         if ! check_command_result $result "解压 $datawork_client_tar_name 失败，请检查文件是否完整"; then
             return 1
         fi
+        
+        # 确保文件权限属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$datawork_client_dir"
         
         # 检查安装目录是否存在
         if [ ! -d "$datawork_client_dir" ]; then
@@ -278,13 +347,17 @@ function install_datawork_client() {
             return 1
         fi
         
-        log "INFO" "开始安装 datawork-client"
-        sh $datawork_client_dir/sbin/install.sh > /dev/null 2>&1 &
+        log "INFO" "使用hadoopuser用户开始安装 datawork-client"
+        # 使用后台进程并重定向标准输出和错误
+        cd $datawork_client_dir && ./sbin/install.sh > /dev/null 2>&1 &
         show_progress $! "安装 datawork-client"
         result=$?
         if ! check_command_result $result "安装 datawork-client 失败，请检查安装脚本"; then
             return 1
         fi
+        
+        # 确保安装后的文件权限仍属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$datawork_client_dir"
         
         log "INFO" "${GREEN}${BOLD}datawork-client 安装完成${RESET}"
         return 0
@@ -293,6 +366,7 @@ function install_datawork_client() {
 
 function install_mt_spark_submit() {
     log "INFO" "${BOLD}${MAGENTA}====== 开始处理 mt-spark-submit ======${RESET}"
+    log "INFO" "使用hadoopuser用户安装mt-spark-submit"
     mt_spark_submit_tar_name="mt-spark-submit.tar.gz"
     mt_spark_submit_dir="$base_dir/mt-spark-submit"
 
@@ -337,12 +411,16 @@ function install_mt_spark_submit() {
         fi
         
         log "INFO" "解压 $mt_spark_submit_tar_name"
-        tar -zxf $packages_dir/$mt_spark_submit_tar_name -C $base_dir > /dev/null 2>&1 &
+        # 使用hadoopuser用户解压
+        run_as_hadoopuser "tar -zxf $packages_dir/$mt_spark_submit_tar_name -C $base_dir" > /dev/null 2>&1 &
         show_progress $! "解压 mt-spark-submit"
         result=$?
         if ! check_command_result $result "解压 $mt_spark_submit_tar_name 失败，请检查文件是否完整"; then
             return 1
         fi
+        
+        # 确保文件权限属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$mt_spark_submit_dir"
         
         # 检查安装目录是否存在
         if [ ! -d "$mt_spark_submit_dir" ]; then
@@ -350,13 +428,17 @@ function install_mt_spark_submit() {
             return 1
         fi
         
-        log "INFO" "开始安装 mt-spark-submit"
-        sh $mt_spark_submit_dir/sbin/install.sh > /dev/null 2>&1 &
+        log "INFO" "使用hadoopuser用户开始安装 mt-spark-submit"
+        # 使用后台进程并重定向标准输出和错误
+        cd $mt_spark_submit_dir && ./sbin/install.sh > /dev/null 2>&1 &
         show_progress $! "安装 mt-spark-submit"
         result=$?
         if ! check_command_result $result "安装 mt-spark-submit 失败，请检查安装脚本"; then
             return 1
         fi
+        
+        # 确保安装后的文件权限仍属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$mt_spark_submit_dir"
         
         log "INFO" "${GREEN}${BOLD}mt-spark-submit 安装完成${RESET}"
         return 0
@@ -365,6 +447,7 @@ function install_mt_spark_submit() {
 
 function install_sven_hadoop() {
     log "INFO" "${BOLD}${MAGENTA}====== 开始处理 sven-hadoop ======${RESET}"
+    log "INFO" "使用hadoopuser用户安装sven-hadoop"
     sven_hadoop_tar_name="sven-hadoop.tar.gz"
     sven_hadoop_dir="$base_dir/sven-hadoop"
 
@@ -409,12 +492,16 @@ function install_sven_hadoop() {
         fi
         
         log "INFO" "解压 $sven_hadoop_tar_name"
-        tar -zxf $packages_dir/$sven_hadoop_tar_name -C $base_dir > /dev/null 2>&1 &
+        # 使用hadoopuser用户解压
+        run_as_hadoopuser "tar -zxf $packages_dir/$sven_hadoop_tar_name -C $base_dir" > /dev/null 2>&1 &
         show_progress $! "解压 sven-hadoop"
         result=$?
         if ! check_command_result $result "解压 $sven_hadoop_tar_name 失败，请检查文件是否完整"; then
             return 1
         fi
+        
+        # 确保文件权限属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$sven_hadoop_dir"
         
         # 检查安装目录是否存在
         if [ ! -d "$sven_hadoop_dir" ]; then
@@ -422,13 +509,17 @@ function install_sven_hadoop() {
             return 1
         fi
         
-        log "INFO" "开始安装 sven-hadoop"
-        sh $sven_hadoop_dir/sbin/install.sh > /dev/null 2>&1 &
+        log "INFO" "使用hadoopuser用户开始安装 sven-hadoop"
+        # 使用后台进程并重定向标准输出和错误
+        cd $sven_hadoop_dir && ./sbin/install.sh > /dev/null 2>&1 &
         show_progress $! "安装 sven-hadoop"
         result=$?
         if ! check_command_result $result "安装 sven-hadoop 失败，请检查安装脚本"; then
             return 1
         fi
+        
+        # 确保安装后的文件权限仍属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$sven_hadoop_dir"
         
         log "INFO" "${GREEN}${BOLD}sven-hadoop 安装完成${RESET}"
         return 0
@@ -437,6 +528,7 @@ function install_sven_hadoop() {
 
 function install_scheduler_d_agent() {
     log "INFO" "${BOLD}${MAGENTA}====== 开始处理 scheduler-d-agent-cloud ======${RESET}"
+    log "INFO" "使用hadoopuser用户安装scheduler-d-agent-cloud"
     scheduler_d_agent_cloud_tar_name="scheduler-d-agent-cloud.tar.gz"
     scheduler_d_agent_cloud_dir="$base_dir/scheduler-d-agent-cloud"
 
@@ -481,12 +573,16 @@ function install_scheduler_d_agent() {
         fi
         
         log "INFO" "解压 $scheduler_d_agent_cloud_tar_name"
-        tar -zxf $packages_dir/$scheduler_d_agent_cloud_tar_name -C $base_dir > /dev/null 2>&1 &
+        # 使用hadoopuser用户解压
+        run_as_hadoopuser "tar -zxf $packages_dir/$scheduler_d_agent_cloud_tar_name -C $base_dir" > /dev/null 2>&1 &
         show_progress $! "解压 scheduler-d-agent-cloud"
         result=$?
         if ! check_command_result $result "解压 $scheduler_d_agent_cloud_tar_name 失败，请检查文件是否完整"; then
             return 1
         fi
+        
+        # 确保文件权限属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$scheduler_d_agent_cloud_dir"
         
         # 检查安装目录是否存在
         if [ ! -d "$scheduler_d_agent_cloud_dir" ]; then
@@ -494,13 +590,17 @@ function install_scheduler_d_agent() {
             return 1
         fi
         
-        log "INFO" "开始安装 scheduler-d-agent-cloud"
-        sh $scheduler_d_agent_cloud_dir/bin/start.sh > /dev/null 2>&1 &
+        log "INFO" "使用hadoopuser用户开始安装 scheduler-d-agent-cloud"
+        # 使用后台进程并重定向标准输出和错误
+        (run_as_hadoopuser "cd $scheduler_d_agent_cloud_dir && ./bin/start.sh") > /dev/null 2>&1 &
         show_progress $! "安装 scheduler-d-agent-cloud"
         result=$?
         if ! check_command_result $result "安装 scheduler-d-agent-cloud 失败，请检查安装脚本"; then
             return 1
         fi
+        
+        # 确保安装后的文件权限仍属于hadoopuser
+        chown -R hadoopuser:hadoopuser "$scheduler_d_agent_cloud_dir"
         
         log "INFO" "${GREEN}${BOLD}scheduler-d-agent-cloud 安装完成${RESET}"
         return 0
@@ -709,6 +809,13 @@ function main() {
     
     # 检查安装环境
     check_environment
+    
+    # 检查并创建hadoopuser用户
+    check_create_hadoopuser
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${RED}hadoopuser用户检查/创建失败，无法继续安装${RESET}"
+        exit 1
+    fi
     
     # 安装JDK
     log "INFO" "${BOLD}${BLUE}开始安装 JDK${RESET}"
