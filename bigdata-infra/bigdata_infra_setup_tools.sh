@@ -22,6 +22,115 @@ log_file="$script_dir/setup_tools_$(date +%Y%m%d_%H%M%S).log"
 force_install=false
 selected_tools=()
 
+# 安装JDK
+function install_jdk() {
+    log "INFO" "${BOLD}${MAGENTA}====== 开始处理 JDK 1.8.0_51 ======${RESET}"
+    jdk_tar_name="jdk1.8.0_51.tar.gz"
+    jdk_dir="$base_dir/jdk1.8.0_51"
+    
+    # 首先检查JAVA_HOME环境变量是否已经设置
+    if [ -n "$JAVA_HOME" ] && ! $force_install; then
+        log "INFO" "${YELLOW}JAVA_HOME环境变量已设置为: $JAVA_HOME，跳过JDK安装${RESET}"
+        
+        # 输出java版本
+        if command -v java > /dev/null 2>&1; then
+            java_version=$(java -version 2>&1)
+            log "INFO" "${GREEN}当前JDK版本信息: ${RESET}"
+            log "INFO" "$java_version"
+        else
+            log "WARN" "${YELLOW}JAVA_HOME已设置，但无法执行java命令${RESET}"
+        fi
+        
+        return 0
+    fi
+    
+    # 检查JDK是否已存在
+    if [ -d "$jdk_dir" ] && ! $force_install; then
+        log "INFO" "${YELLOW}$jdk_dir 已存在，无须重新安装${RESET}"
+    else
+        if $force_install && [ -d "$jdk_dir" ]; then
+            log "WARN" "强制重新安装 JDK"
+            rm -rf "$jdk_dir"
+        fi
+        
+        log "INFO" "${CYAN}开始安装 JDK${RESET}"
+        
+        # 首先检查安装包目录下是否有安装包
+        if [ -f "$packages_dir/$jdk_tar_name" ]; then
+            log "INFO" "在安装包目录中找到 $jdk_tar_name"
+        else
+            log "INFO" "$jdk_tar_name 在安装包目录 $packages_dir 中不存在，尝试从远程拉取"
+            rsync -av --progress $remote_dir/$jdk_tar_name $packages_dir
+            # 检查rsync命令是否成功
+            if ! check_command_result $? "从远程拉取 $jdk_tar_name 失败，请检查远程源是否可用或文件是否存在"; then
+                return 1
+            fi
+        fi
+        
+        # 再次检查文件是否存在
+        if [ ! -f "$packages_dir/$jdk_tar_name" ]; then
+            log "ERROR" "$jdk_tar_name 文件不存在，无法继续安装"
+            return 1
+        fi
+        
+        # 创建安装目录（如果不存在）
+        if [ ! -d "$base_dir" ]; then
+            log "INFO" "创建安装目录 $base_dir"
+            mkdir -p "$base_dir"
+            if [ $? -ne 0 ]; then
+                log "ERROR" "无法创建安装目录 $base_dir"
+                return 1
+            fi
+        fi
+        
+        log "INFO" "解压 $jdk_tar_name"
+        tar -zxf $packages_dir/$jdk_tar_name -C $base_dir > /dev/null 2>&1 &
+        show_progress $! "解压 JDK"
+        result=$?
+        if ! check_command_result $result "解压 $jdk_tar_name 失败，请检查文件是否完整"; then
+            return 1
+        fi
+        
+        # 检查安装目录是否存在
+        if [ ! -d "$jdk_dir" ]; then
+            log "ERROR" "解压后未找到 $jdk_dir 目录，安装包可能损坏"
+            return 1
+        fi
+        
+        # 配置环境变量
+        log "INFO" "配置JDK环境变量"
+        
+        # 检查是否已配置环境变量
+        if grep -q "JAVA_HOME=$jdk_dir" /root/.bashrc; then
+            log "INFO" "JAVA_HOME环境变量已存在，无需重复配置"
+        else
+            # 添加环境变量到root的.bashrc文件
+            echo "" >> /root/.bashrc
+            echo "# JDK环境变量配置" >> /root/.bashrc
+            echo "export JAVA_HOME=$jdk_dir" >> /root/.bashrc
+            echo "export PATH=\$JAVA_HOME/bin:\$PATH" >> /root/.bashrc
+            
+            # 使环境变量立即生效
+            export JAVA_HOME=$jdk_dir
+            export PATH=$JAVA_HOME/bin:$PATH
+            
+            log "INFO" "已配置JAVA_HOME=$jdk_dir"
+            log "INFO" "已将JDK添加到PATH环境变量"
+        fi
+        
+        # 验证JDK安装
+        if command -v java > /dev/null 2>&1; then
+            java_version=$(java -version 2>&1 | head -n 1)
+            log "INFO" "${GREEN}JDK安装验证成功: $java_version${RESET}"
+        else
+            log "WARN" "JDK安装可能未成功，无法执行java命令"
+        fi
+        
+        log "INFO" "${GREEN}${BOLD}JDK 安装完成${RESET}"
+    fi
+    return 0
+}
+
 # 版本信息
 VERSION="1.0.0"
 
@@ -600,6 +709,18 @@ function main() {
     
     # 检查安装环境
     check_environment
+    
+    # 安装JDK
+    log "INFO" "${BOLD}${BLUE}开始安装 JDK${RESET}"
+    install_jdk
+    if [ $? -eq 0 ]; then
+        install_results["JDK"]="成功"
+        log "INFO" "${GREEN}JDK 安装成功${RESET}"
+    else
+        install_results["JDK"]="失败"
+        log "ERROR" "${RED}JDK 安装失败，可能会影响其他组件的安装${RESET}"
+    fi
+    log "INFO" "${BOLD}${BLUE}------------------------------${RESET}"
     
     # 开始时间
     start_time=$(date +%s)
